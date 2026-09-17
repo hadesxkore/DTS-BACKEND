@@ -1,5 +1,7 @@
 const express = require('express');
 const Department = require('../models/Department');
+const EndUser = require('../models/EndUser');
+const ProcurementUser = require('../models/ProcurementUser');
 const { authenticateToken } = require('./auth.routes');
 
 const router = express.Router();
@@ -95,7 +97,7 @@ router.patch('/:departmentId', authenticateToken, async (req, res) => {
   }
 });
 
-// DELETE /api/departments/:departmentId - permanently delete a department
+// DELETE /api/departments/:departmentId - permanently delete a department & cascade delete associated user accounts
 router.delete('/:departmentId', authenticateToken, async (req, res) => {
   try {
     const departmentId = Number(req.params.departmentId);
@@ -108,7 +110,18 @@ router.delete('/:departmentId', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Department not found' });
     }
 
-    res.json({ message: 'Department deleted successfully' });
+    // Delete all user accounts (EndUser & ProcurementUser) under this department
+    const deptNameRaw = String(deleted.name || '').trim();
+    if (deptNameRaw) {
+      const escaped = escapeRegex(deptNameRaw);
+      const deptQuery = { $regex: `^${escaped}$`, $options: 'i' };
+      await Promise.all([
+        EndUser.deleteMany({ office: deptQuery }),
+        ProcurementUser.deleteMany({ office: deptQuery }),
+      ]);
+    }
+
+    res.json({ message: 'Department and associated user accounts deleted successfully' });
   } catch (error) {
     console.error('Delete department error:', error);
     res.status(500).json({ message: 'Server error' });

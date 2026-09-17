@@ -4,6 +4,7 @@ const User = require('../models/User');
 const EndUser = require('../models/EndUser');
 const ProcurementUser = require('../models/ProcurementUser');
 const Office = require('../models/Office');
+const Department = require('../models/Department');
 const SystemSettings = require('../models/SystemSettings');
 
 const router = express.Router();
@@ -55,15 +56,25 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // If enduser or procurement user, ensure their Office exists and is active
+    // If enduser or procurement user, ensure their Office or Department exists and is active
     if (userType === 'enduser' || userType === 'procurement') {
       const officeName = String(user.office || '').trim();
       if (officeName) {
         const escaped = officeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const officeDoc = await Office.findOne({ name: { $regex: `^${escaped}$`, $options: 'i' } }).select('status');
+        const [officeDoc, deptDoc] = await Promise.all([
+          Office.findOne({ name: { $regex: `^${escaped}$`, $options: 'i' } }).select('status'),
+          Department.findOne({ name: { $regex: `^${escaped}$`, $options: 'i' } }).select('status'),
+        ]);
 
-        if (!officeDoc || officeDoc.status !== 'active') {
-          return res.status(401).json({ message: 'Office has been deleted or archived. Login is not allowed.' });
+        if (!officeDoc && !deptDoc) {
+          return res.status(401).json({ message: 'Department or Office has been deleted. Login is not allowed.' });
+        }
+
+        const isOfficeActive = officeDoc ? officeDoc.status === 'active' : true;
+        const isDeptActive = deptDoc ? deptDoc.status === 'active' : true;
+
+        if (!isOfficeActive || !isDeptActive) {
+          return res.status(401).json({ message: 'Department or Office is archived or disabled. Login is not allowed.' });
         }
       }
     }
