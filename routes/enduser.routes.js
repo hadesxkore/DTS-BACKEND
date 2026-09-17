@@ -188,4 +188,18 @@ router.patch('/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// DELETE /api/endusers/:id - Delete end user
+router.delete('/:id', authenticateToken, async (req, res) => {
+  try {
+    const deletedUser = await EndUser.findByIdAndDelete(req.params.id);
+    if (!deletedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Delete end user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 module.exports = router;

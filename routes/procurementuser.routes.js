@@ -207,4 +207,18 @@ router.patch('/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// DELETE /api/procurementusers/:id - Delete procurement user
+router.delete('/:id', authenticateToken, async (req, res) => {
+  try {
+    const deletedUser = await ProcurementUser.findByIdAndDelete(req.params.id);
+    if (!deletedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Delete procurement user error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 module.exports = router;

@@ -55,15 +55,15 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // If procurement user, ensure their Office is active
-    if (userType === 'procurement') {
+    // If enduser or procurement user, ensure their Office exists and is active
+    if (userType === 'enduser' || userType === 'procurement') {
       const officeName = String(user.office || '').trim();
       if (officeName) {
         const escaped = officeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const officeDoc = await Office.findOne({ name: { $regex: `^${escaped}$`, $options: 'i' } }).select('status');
 
         if (!officeDoc || officeDoc.status !== 'active') {
-          return res.status(401).json({ message: 'Office is archived or disabled. Login is not allowed.' });
+          return res.status(401).json({ message: 'Office has been deleted or archived. Login is not allowed.' });
         }
       }
     }

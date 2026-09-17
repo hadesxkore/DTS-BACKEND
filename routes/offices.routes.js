@@ -1,6 +1,7 @@
 const express = require('express');
 const Office = require('../models/Office');
 const EndUser = require('../models/EndUser');
+const ProcurementUser = require('../models/ProcurementUser');
 const { authenticateToken } = require('./auth.routes');
 
 const router = express.Router();
@@ -168,7 +169,7 @@ router.patch('/:officeId/tasks/:taskId', authenticateToken, async (req, res) => 
   }
 });
 
-// DELETE /api/offices/:officeId - permanently delete an office
+// DELETE /api/offices/:officeId - permanently delete an office & cascade delete associated user accounts
 router.delete('/:officeId', authenticateToken, async (req, res) => {
   try {
     const officeId = Number(req.params.officeId);
@@ -181,7 +182,18 @@ router.delete('/:officeId', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Office not found' });
     }
 
-    res.json({ message: 'Office deleted successfully' });
+    // Delete all user accounts (EndUser & ProcurementUser) under this office
+    const officeNameRaw = String(deleted.name || '').trim();
+    if (officeNameRaw) {
+      const escaped = officeNameRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const officeQuery = { $regex: `^${escaped}$`, $options: 'i' };
+      await Promise.all([
+        EndUser.deleteMany({ office: officeQuery }),
+        ProcurementUser.deleteMany({ office: officeQuery }),
+      ]);
+    }
+
+    res.json({ message: 'Office and associated user accounts deleted successfully' });
   } catch (error) {
     console.error('Delete office error:', error);
     res.status(500).json({ message: 'Server error' });
