@@ -8,54 +8,7 @@ const router = express.Router();
 // GET /api/offices - list offices
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    let offices = await Office.find({}).sort({ officeId: 1 });
-
-    if (!offices.length) {
-      await Office.insertMany([
-        {
-          officeId: 1,
-          name: 'PGO',
-          description: 'PROVINCIAL GOVERNOR OFFICE',
-          head: 'MYRNA B. ROMAN',
-          headDesignation: '',
-          type: 'operating',
-          status: 'active',
-          privileges: ['Approvals', 'All Documents', 'Reports'],
-          tasks: [
-            { taskId: 1, task: 'For Attachment of Barcode', duration: 'null hour(s)', status: 'archived' },
-            { taskId: 2, task: 'For Signing / Approval', duration: '9 hour(s)', status: 'active' },
-            { taskId: 3, task: 'For PO Signing', duration: '9 hour(s)', status: 'active' },
-            { taskId: 4, task: 'For Signing of Checks & Voucher', duration: '9 hour(s)', status: 'active' },
-            { taskId: 28, task: 'For Signing of Petty Cash Voucher', duration: '9 hour(s)', status: 'active' },
-            { taskId: 31, task: 'Received', duration: '9 hour(s)', status: 'active' },
-          ],
-        },
-        {
-          officeId: 2,
-          name: 'GSO',
-          description: 'PROVINCIAL GENERAL SERVICES OFFICE',
-          head: 'AILEEN C. SAGUN',
-          headDesignation: '',
-          type: 'operating',
-          status: 'active',
-          privileges: ['All Documents'],
-          tasks: [],
-        },
-        {
-          officeId: 3,
-          name: 'BUDGET',
-          description: 'Office of the Provincial Budget Officer',
-          head: 'ALICIA R. MAGPANTAY',
-          headDesignation: '',
-          type: 'operating',
-          status: 'active',
-          privileges: ['Approvals', 'Reports'],
-          tasks: [],
-        },
-      ]);
-
-      offices = await Office.find({}).sort({ officeId: 1 });
-    }
+    const offices = await Office.find({}).sort({ officeId: 1 });
     res.json({ offices });
   } catch (error) {
     console.error('Get offices error:', error);
