@@ -266,6 +266,8 @@ function authenticateToken(req, res, next) {
     req.user = user;
     next();
   });
+}
+
 function getPhilippineTimeInfo() {
   const now = new Date();
   const formatter = new Intl.DateTimeFormat('en-US', {
