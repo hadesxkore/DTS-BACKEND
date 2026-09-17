@@ -56,7 +56,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // If enduser or procurement user, ensure their Office or Department exists and is active
+    // If enduser or procurement user, ensure their Office or Department is not explicitly archived
     if (userType === 'enduser' || userType === 'procurement') {
       const officeName = String(user.office || '').trim();
       if (officeName) {
@@ -66,15 +66,11 @@ router.post('/login', async (req, res) => {
           Department.findOne({ name: { $regex: `^${escaped}$`, $options: 'i' } }).select('status'),
         ]);
 
-        if (!officeDoc && !deptDoc) {
-          return res.status(401).json({ message: 'Department or Office has been deleted. Login is not allowed.' });
-        }
+        const isOfficeArchived = officeDoc && officeDoc.status === 'archived';
+        const isDeptArchived = deptDoc && deptDoc.status === 'archived';
 
-        const isOfficeActive = officeDoc ? officeDoc.status === 'active' : true;
-        const isDeptActive = deptDoc ? deptDoc.status === 'active' : true;
-
-        if (!isOfficeActive || !isDeptActive) {
-          return res.status(401).json({ message: 'Department or Office is archived or disabled. Login is not allowed.' });
+        if (isOfficeArchived || isDeptArchived) {
+          return res.status(401).json({ message: 'Your office or department is archived. Login is not allowed.' });
         }
       }
     }
