@@ -76,20 +76,7 @@ router.post('/login', async (req, res) => {
     // ── Schedule + Special-date check (end-users & procurement users only) ───
     if (userType === 'enduser' || userType === 'procurement') {
       try {
-        const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-        // Use Philippine Standard Time (UTC+8) for schedule checks
-        const now = new Date();
-        const PH_OFFSET_MS = 8 * 60 * 60 * 1000;
-        const nowPH = new Date(now.getTime() + PH_OFFSET_MS);
-        const dayKey = DAYS[nowPH.getUTCDay()];
-        const hhmm = `${String(nowPH.getUTCHours()).padStart(2, '0')}:${String(nowPH.getUTCMinutes()).padStart(2, '0')}`;
-
-        // "YYYY-MM-DD" of today in Philippine time
-        const yyyy = nowPH.getUTCFullYear();
-        const mm = String(nowPH.getUTCMonth() + 1).padStart(2, '0');
-        const dd = String(nowPH.getUTCDate()).padStart(2, '0');
-        const todayFull = `${yyyy}-${mm}-${dd}`;   // e.g. "2026-03-24"
-        const todayMmDd = `${mm}-${dd}`;           // e.g. "03-24"
+        const { dayKey, currentMinutes, todayFull, todayMmDd } = getPhilippineTimeInfo();
 
         const settings = await SystemSettings.findOne({ key: 'global' }).lean();
 
@@ -97,8 +84,7 @@ router.post('/login', async (req, res) => {
         const specialDates = settings?.specialDates ?? [];
         const specialToday = specialDates.find((sd) => {
           if (sd.section === 'non-recurrent') return sd.date === todayFull;
-          // recurrent: stored as "MM-DD"
-          const storedMmDd = sd.date.length === 10 ? sd.date.slice(5) : sd.date; // handle YYYY-MM-DD too
+          const storedMmDd = sd.date.length === 10 ? sd.date.slice(5) : sd.date;
           return storedMmDd === todayMmDd;
         });
 
@@ -111,24 +97,43 @@ router.post('/login', async (req, res) => {
             });
           }
           // Half-day / special hours → use the special date's window
-          if (hhmm < specialToday.from || hhmm >= specialToday.to) {
-            return res.status(401).json({
-              message: `Today is a special day (${specialToday.description || 'special schedule'}). Login is only allowed between ${specialToday.from} and ${specialToday.to}.`,
-            });
+          const specFromMins = parseTimeToMinutes(specialToday.from, false);
+          const specToMins = parseTimeToMinutes(specialToday.to, true, specFromMins ?? 0);
+          if (specFromMins !== null && specToMins !== null) {
+            if (currentMinutes < specFromMins || currentMinutes >= specToMins) {
+              return res.status(401).json({
+                message: `Today is a special day (${specialToday.description || 'special schedule'}). Login is only allowed between ${specialToday.from} and ${specialToday.to}.`,
+              });
+            }
           }
-          // Within special hours → allow login (skip normal schedule check)
         } else {
           // 2) Normal weekday schedule check
-          const sched = settings?.defaultSchedule?.[dayKey];
+          const fallbackSched = {
+            monday:    { enabled: true,  from: '08:00', to: '17:00' },
+            tuesday:   { enabled: true,  from: '08:00', to: '17:00' },
+            wednesday: { enabled: true,  from: '08:00', to: '17:00' },
+            thursday:  { enabled: true,  from: '08:00', to: '17:00' },
+            friday:    { enabled: true,  from: '08:00', to: '17:00' },
+            saturday:  { enabled: false, from: '',      to: ''      },
+            sunday:    { enabled: false, from: '',      to: ''      },
+          };
+
+          const sched = settings?.defaultSchedule?.[dayKey] ?? fallbackSched[dayKey];
           if (!sched || !sched.enabled) {
             return res.status(401).json({
               message: `Login is not allowed today (${dayKey}). Office is closed.`,
             });
           }
-          if (hhmm < sched.from || hhmm >= sched.to) {
-            return res.status(401).json({
-              message: `Login is only allowed between ${sched.from} and ${sched.to}. Please try again during office hours.`,
-            });
+
+          const fromMins = parseTimeToMinutes(sched.from, false);
+          const toMins = parseTimeToMinutes(sched.to, true, fromMins ?? 0);
+
+          if (fromMins !== null && toMins !== null) {
+            if (currentMinutes < fromMins || currentMinutes >= toMins) {
+              return res.status(401).json({
+                message: `Login is only allowed between ${sched.from} and ${sched.to}. Please try again during office hours.`,
+              });
+            }
           }
         }
       } catch (schedErr) {
@@ -261,6 +266,69 @@ function authenticateToken(req, res, next) {
     req.user = user;
     next();
   });
+function getPhilippineTimeInfo() {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Manila',
+    weekday: 'long',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(now);
+  const map = {};
+  for (const p of parts) {
+    if (p.type !== 'literal') map[p.type] = p.value;
+  }
+
+  const dayKey = String(map.weekday || '').toLowerCase();
+
+  let hour = parseInt(map.hour, 10);
+  if (hour === 24) hour = 0;
+  const minute = parseInt(map.minute, 10);
+
+  const currentMinutes = hour * 60 + minute;
+  const yyyy = map.year;
+  const mm = map.month;
+  const dd = map.day;
+  const todayFull = `${yyyy}-${mm}-${dd}`;
+  const todayMmDd = `${mm}-${dd}`;
+
+  return { dayKey, hour, minute, currentMinutes, todayFull, todayMmDd };
+}
+
+function parseTimeToMinutes(rawStr, isEndTime = false, referenceFromMinutes = 0) {
+  if (!rawStr || typeof rawStr !== 'string') return null;
+  const str = rawStr.trim().toUpperCase();
+  if (!str) return null;
+
+  const isPM = str.includes('PM');
+  const isAM = str.includes('AM');
+  const cleanStr = str.replace(/[^\d:]/g, '');
+
+  const parts = cleanStr.split(':');
+  if (!parts[0]) return null;
+  let hours = parseInt(parts[0], 10);
+  let minutes = parts.length > 1 ? parseInt(parts[1], 10) : 0;
+
+  if (isNaN(hours)) return null;
+  if (isNaN(minutes)) minutes = 0;
+
+  if (isPM && hours < 12) hours += 12;
+  if (isAM && hours === 12) hours = 0;
+
+  let total = hours * 60 + minutes;
+
+  // Handle case where user entered "5:00" or "05:00" instead of "17:00" for 5 PM
+  if (isEndTime && referenceFromMinutes > 0 && total <= referenceFromMinutes && hours < 12) {
+    total += 720;
+  }
+
+  return total;
 }
 
 module.exports = { router, authenticateToken };
