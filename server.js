@@ -12,7 +12,7 @@ const app = express();
 const server = http.createServer(app);
 
 // Parse client origins for CORS
-const rawClientUrls = process.env.CLIENT_URL || "http://localhost:5173";
+const rawClientUrls = process.env.CLIENT_URL || "*";
 const allowedOrigins = rawClientUrls
   .split(',')
   .map(url => url.trim().replace(/\/$/, ''))
@@ -27,12 +27,14 @@ const corsOptions = {
       allowedOrigins.includes(cleanOrigin) ||
       process.env.NODE_ENV !== 'production'
     ) {
-      return callback(null, true);
+      return callback(null, cleanOrigin);
     }
-    return callback(null, true); // Permissive to prevent CORS block on varied deployment subdomains
+    return callback(null, cleanOrigin);
   },
   methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-  credentials: true
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+  credentials: true,
+  optionsSuccessStatus: 200
 };
 
 // Socket.IO setup with CORS
@@ -79,6 +81,8 @@ io.on('connection', (socket) => {
 
 // Middleware
 app.use(cors(corsOptions));
+// Explicitly handle all OPTIONS preflight requests (required for credentialed cross-origin requests)
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
