@@ -102,7 +102,8 @@ mongoose.connection.on('error', (err) => {
 // MongoDB Connection with auto-retry
 const connectDB = async (retryCount = 0) => {
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+    const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/dts_db';
+    const conn = await mongoose.connect(mongoUri, {
       serverSelectionTimeoutMS: 10000,
     });
     console.log(`MongoDB Connected: ${conn.connection.host}`);

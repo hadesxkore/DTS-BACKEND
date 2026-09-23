@@ -162,7 +162,7 @@ router.post('/login', async (req, res) => {
         username: user.username,
         role: userType === 'admin' ? user.role : userType === 'procurement' ? 'procurement' : user.type
       },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || 'dts_jwt_secret_dev_fallback_key',
       { expiresIn: process.env.JWT_EXPIRE || '7d' }
     );
 
@@ -266,7 +266,7 @@ function authenticateToken(req, res, next) {
     return res.status(401).json({ message: 'Access denied. No token provided.' });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET || 'dts_jwt_secret_dev_fallback_key', (err, user) => {
     if (err) {
       return res.status(403).json({ message: 'Invalid or expired token' });
     }

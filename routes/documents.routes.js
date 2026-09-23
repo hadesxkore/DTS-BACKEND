@@ -383,6 +383,42 @@ router.post('/', authenticateToken, async (req, res) => {
     // Emit real-time event for new document (single broadcast to prevent duplicate client triggers)
     if (global.io) {
       global.io.emit('document:created', { document: doc });
+
+      // Targeted notification to GSO / Reviewers that a new document was submitted (For Review)
+      const trackingNo = String(doc.trackingNo || '').trim();
+      const docCreatedBy = String(doc.createdBy || '').trim();
+      const docOffice = String(doc.office || '').trim();
+      const purpose = String(doc.purpose || '').trim();
+
+      const notifTitle = `📄 For Review: #${trackingNo}`;
+      const notifMessage = `New request submitted by ${docCreatedBy}${docOffice ? ` (${docOffice})` : ''}${purpose ? ` • ${purpose}` : ''}`;
+
+      const forReviewPayload = {
+        type: 'NEW_REQUEST_FOR_REVIEW',
+        title: notifTitle,
+        message: notifMessage,
+        documentId: String(doc._id),
+        trackingNo,
+        createdBy: docCreatedBy,
+        byUser: docCreatedBy,
+        byOffice: docOffice,
+        timestamp: new Date().toISOString(),
+        document: doc,
+      };
+
+      const gsoRooms = [
+        'office:GSO',
+        'office:OFFICE OF THE PROVINCIAL GENERAL SERVICES',
+        'office:GENERAL SERVICES OFFICE',
+        'role:gso',
+        'role:procurement',
+        'role:admin',
+        'role:superadmin',
+      ];
+
+      for (const room of gsoRooms) {
+        global.io.to(room).emit('notification:office', forReviewPayload);
+      }
     }
 
     res.status(201).json({
@@ -547,7 +583,7 @@ router.patch('/:id', authenticateToken, async (req, res) => {
 
     if (!isAdminRole) {
       const officeLower = String(officeName || '').trim().toLowerCase();
-      const isGsoOrBac = officeLower.includes('gso') || officeLower.includes('bac');
+      const isGsoOrBac = officeLower.includes('gso') || officeLower.includes('bac') || officeLower.includes('general services') || officeLower.includes('bids') || officeLower.includes('pgso');
 
       for (const p of requiredPrivileges) {
         if (isDocumentOwner) {
@@ -780,8 +816,253 @@ router.patch('/:id', authenticateToken, async (req, res) => {
         timestamp: new Date().toISOString()
       };
 
-      // Single broadcast to all clients to prevent 3x redundant socket events on clients
+      // Silent data-refresh broadcast to all clients (no toast shown from this)
       global.io.emit('document:updated', eventData);
+
+      // ── Targeted toast notification to document creator only ──────────────
+      const docCreatedBy = String(doc.createdBy || '').trim();
+      const docOffice    = String(doc.office    || '').trim();
+      const trackingNo   = String(doc.trackingNo || '').trim();
+
+      // ── Determine Who Performed the Current Action ───────────────────────
+      const currentRole = String(req.user?.role || '').trim().toLowerCase();
+      const currentUsername = String(req.user?.username || '').trim();
+      const currentFullName = String(req.user?.fullName || '').trim();
+      const reqActorName = currentFullName || currentUsername || 'User';
+
+      const hasNewLog = Boolean(addLog && typeof addLog === 'object' && addLog.label);
+      const logByUser = hasNewLog && typeof addLog.byUser === 'string' ? addLog.byUser.trim() : '';
+      const logByOffice = hasNewLog && typeof addLog.byOffice === 'string' ? addLog.byOffice.trim() : '';
+
+      const lastLog = Array.isArray(doc.logs) && doc.logs.length > 0
+        ? doc.logs[doc.logs.length - 1]
+        : null;
+      const lastLabel = String(lastLog?.label || '').trim().toLowerCase();
+
+      const isReturnedLog = hasNewLog && lastLabel.startsWith('returned');
+      const isApprovedLog = hasNewLog && (lastLabel.startsWith('approved') || lastLabel.startsWith('completed'));
+      const isRoutingSlip = typeof gsoRoutingSlip === 'string' && gsoRoutingSlip.trim().length > 0;
+      const isReviewLog   = hasNewLog && (
+        lastLabel.startsWith('remarks') ||
+        lastLabel.includes('review') ||
+        lastLabel.startsWith('transferred to') ||
+        lastLabel.includes('reply')
+      );
+
+      const isCurrentRequestProcurementOrAdmin =
+        currentRole === 'procurement' ||
+        currentRole === 'admin' ||
+        currentRole === 'superadmin' ||
+        logByOffice.toUpperCase().includes('GSO') ||
+        logByOffice.toUpperCase().includes('GENERAL SERVICES') ||
+        logByOffice.toUpperCase().includes('BAC') ||
+        logByOffice.toUpperCase().includes('BUDGET') ||
+        logByOffice.toUpperCase().includes('PTO');
+
+      const isCurrentRequestEndUser =
+        currentRole === 'viewer' ||
+        currentRole === 'staff' ||
+        (!isCurrentRequestProcurementOrAdmin && (
+          (docCreatedBy && currentUsername.toLowerCase() === docCreatedBy.toLowerCase()) ||
+          (docCreatedBy && logByUser.toLowerCase() === docCreatedBy.toLowerCase())
+        ));
+
+      // ── 1. Notify Document Creator if GSO / Procurement / Admin acted ──────
+      const shouldNotifyCreator = docCreatedBy &&
+        !isCurrentRequestEndUser &&
+        (isReturnedLog || isApprovedLog || isRoutingSlip || isReviewLog);
+
+      if (shouldNotifyCreator) {
+        let notifTitle = '🔔 Document Update';
+        let notifMessage = `#${trackingNo}`;
+
+        if (isReturnedLog) {
+          notifTitle = `↩️ Document Returned: #${trackingNo}`;
+          const remarkPart = lastLog?.label?.includes(':')
+            ? lastLog.label.slice(lastLog.label.indexOf(':') + 1).trim()
+            : '';
+          notifMessage = remarkPart
+            ? `Returned by ${logByUser || logByOffice || reqActorName}: ${remarkPart}`
+            : `Your document was returned by ${logByUser || logByOffice || reqActorName}`;
+        } else if (isApprovedLog) {
+          notifTitle = `✅ Document Approved: #${trackingNo}`;
+          const remarkPart = lastLog?.label?.includes(':')
+            ? lastLog.label.slice(lastLog.label.indexOf(':') + 1).trim()
+            : '';
+          notifMessage = remarkPart
+            ? `Approved by ${logByUser || logByOffice || reqActorName}: ${remarkPart}`
+            : `Your document was approved by ${logByUser || logByOffice || reqActorName}`;
+        } else if (isRoutingSlip) {
+          notifTitle = `📋 Routing Slip Assigned: #${trackingNo}`;
+          notifMessage = `Routing slip category set to "${gsoRoutingSlip.trim()}" by GSO`;
+        } else if (isReviewLog) {
+          notifTitle = `📝 Review Log Added: #${trackingNo}`;
+          const remarkPart = lastLog?.label?.includes(':')
+            ? lastLog.label.slice(lastLog.label.indexOf(':') + 1).trim()
+            : lastLog?.label || '';
+          notifMessage = remarkPart
+            ? `${remarkPart} — by ${logByUser || logByOffice || reqActorName}`
+            : `Review log added by ${logByUser || logByOffice || reqActorName}`;
+        }
+
+        const notifPayload = {
+          type: 'DOCUMENT_ACTION',
+          title: notifTitle,
+          message: notifMessage,
+          documentId: String(doc._id),
+          trackingNo,
+          createdBy: docCreatedBy,
+          byUser: logByUser || reqActorName,
+          byOffice: logByOffice || 'GSO',
+          timestamp: new Date().toISOString(),
+          document: doc,
+        };
+
+        // Send to creator's personal room
+        global.io.to(`user:${docCreatedBy}`).emit('notification:user', notifPayload);
+
+        // Also send to creator's office room
+        if (docOffice) {
+          global.io.to(`office:${docOffice}`).emit('notification:office', notifPayload);
+        }
+      }
+
+      // ── 2. Notify GSO / Reviewer if End-User replied in Review Logs ────────
+      const isReplyFromEndUser = isReviewLog && isCurrentRequestEndUser;
+
+      if (isReplyFromEndUser) {
+        // Find the previous reviewer who commented/returned this document
+        let targetReviewerUser = '';
+        let targetReviewerOffice = '';
+
+        const logs = Array.isArray(doc.logs) ? doc.logs : [];
+        for (let i = logs.length - 2; i >= 0; i--) {
+          const l = logs[i];
+          const off = String(l?.byOffice || '').trim().toUpperCase();
+          const usr = String(l?.byUser || '').trim();
+          if (
+            off.includes('GSO') ||
+            off.includes('GENERAL SERVICES') ||
+            off.includes('BAC') ||
+            off.includes('PROCUREMENT')
+          ) {
+            targetReviewerUser = usr;
+            targetReviewerOffice = off;
+            break;
+          }
+        }
+
+        const remarkPart = lastLog?.label?.includes(':')
+          ? lastLog.label.slice(lastLog.label.indexOf(':') + 1).trim()
+          : lastLog?.label || '';
+
+        const replyPayload = {
+          type: 'REVIEW_REPLY',
+          title: `💬 End-User Replied: #${trackingNo}`,
+          message: `${logByUser || reqActorName} replied: "${remarkPart}"`,
+          documentId: String(doc._id),
+          trackingNo,
+          createdBy: docCreatedBy,
+          byUser: logByUser || reqActorName,
+          byOffice: logByOffice || docOffice,
+          timestamp: new Date().toISOString(),
+          document: doc,
+        };
+
+        // Send directly to the reviewer who previously handled the document
+        if (targetReviewerUser) {
+          global.io.to(`user:${targetReviewerUser}`).emit('notification:user', replyPayload);
+        }
+
+        // Send to GSO / Procurement office rooms
+        const targetOffices = new Set([
+          'GSO',
+          'OFFICE OF THE PROVINCIAL GENERAL SERVICES',
+          'GENERAL SERVICES OFFICE',
+          targetReviewerOffice
+        ].filter(Boolean));
+
+        for (const off of targetOffices) {
+          global.io.to(`office:${off}`).emit('notification:office', replyPayload);
+        }
+      }
+
+      // ── 3. Notify Destination Office and Document Creator on Transfer ─────
+      const isTransferLog = hasNewLog && (lastLabel.startsWith('transferred to') || lastLabel.includes('transferred to'));
+
+      if (isTransferLog) {
+        const match = lastLabel.match(/transferred\s+to\s+([^(:\n]+)/i);
+        const destOffice = match ? match[1].trim().toUpperCase() : 'RECEIVING OFFICE';
+
+        const taskMatch = lastLabel.match(/\(([^)]+)\)/) || lastLabel.match(/:\s*(.+)$/);
+        const taskText = taskMatch ? taskMatch[1].trim() : '';
+
+        const senderInfo = logByUser || reqActorName;
+        const senderOfficeInfo = docOffice || logByOffice;
+
+        // 3A. Alert to Destination Office
+        const incomingPayload = {
+          type: 'DOCUMENT_TRANSFERRED',
+          title: `📤 Incoming Document: #${trackingNo}`,
+          message: `Document transferred to ${destOffice} by ${senderInfo}${senderOfficeInfo ? ` (${senderOfficeInfo})` : ''}${taskText ? ` • ${taskText}` : ''}`,
+          documentId: String(doc._id),
+          trackingNo,
+          createdBy: docCreatedBy,
+          destOffice,
+          byUser: senderInfo,
+          byOffice: senderOfficeInfo,
+          timestamp: new Date().toISOString(),
+          document: doc,
+        };
+
+        const destRooms = new Set([
+          `office:${destOffice}`,
+          destOffice.includes('BUDGET') ? 'office:BUDGET' : '',
+          destOffice.includes('BUDGET') ? 'office:PROVINCIAL BUDGET OFFICE' : '',
+          destOffice.includes('BUDGET') ? 'office:OFFICE OF THE PROVINCIAL BUDGET OFFICER' : '',
+          destOffice.includes('PTO') || destOffice.includes('TREASURER') ? 'office:PTO' : '',
+          destOffice.includes('PTO') || destOffice.includes('TREASURER') ? 'office:PROVINCIAL TREASURERS OFFICE' : '',
+          destOffice.includes('PTO') || destOffice.includes('TREASURER') ? "office:PROVINCIAL TREASURER'S OFFICE" : '',
+          destOffice.includes('PTO') || destOffice.includes('TREASURER') ? 'office:OFFICE OF THE PROVINCIAL TREASURER' : '',
+          destOffice.includes('GSO') || destOffice.includes('GENERAL SERVICES') ? 'office:GSO' : '',
+          destOffice.includes('GSO') || destOffice.includes('GENERAL SERVICES') ? 'office:OFFICE OF THE PROVINCIAL GENERAL SERVICES' : '',
+          destOffice.includes('GSO') || destOffice.includes('GENERAL SERVICES') ? 'office:GENERAL SERVICES OFFICE' : '',
+          destOffice.includes('BAC') || destOffice.includes('BIDS') ? 'office:BAC' : '',
+          destOffice.includes('BAC') || destOffice.includes('BIDS') ? 'office:BIDS AND AWARDS COMMITTEE' : '',
+          destOffice.includes('ACCOUNTING') ? 'office:ACCOUNTING' : '',
+          destOffice.includes('ACCOUNTING') ? 'office:PROVINCIAL ACCOUNTING OFFICE' : '',
+          `role:${destOffice.toLowerCase()}`,
+        ].filter(Boolean));
+
+        for (const room of destRooms) {
+          global.io.to(room).emit('notification:office', incomingPayload);
+        }
+
+        // 3B. Alert to Document Creator (if transferred by procurement / other office)
+        const isTransferredBySomeoneElse = docCreatedBy &&
+          senderInfo.toLowerCase() !== docCreatedBy.toLowerCase();
+
+        if (isTransferredBySomeoneElse) {
+          const creatorPayload = {
+            type: 'DOCUMENT_TRANSFERRED',
+            title: `📤 Document In Transit: #${trackingNo}`,
+            message: `Your document #${trackingNo} was transferred to ${destOffice} by ${senderInfo}${taskText ? ` (${taskText})` : ''}`,
+            documentId: String(doc._id),
+            trackingNo,
+            createdBy: docCreatedBy,
+            destOffice,
+            byUser: senderInfo,
+            byOffice: senderOfficeInfo,
+            timestamp: new Date().toISOString(),
+            document: doc,
+          };
+
+          global.io.to(`user:${docCreatedBy}`).emit('notification:user', creatorPayload);
+          if (docOffice) {
+            global.io.to(`office:${docOffice}`).emit('notification:office', creatorPayload);
+          }
+        }
+      }
     }
 
     res.json({ message: 'Document updated successfully', document: doc });
