@@ -1072,4 +1072,43 @@ router.patch('/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// DELETE /api/documents/:id - Delete document (Admin only)
+router.delete('/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const role = String(req.user?.role || '').trim().toLowerCase();
+    const isAdminRole = role === 'admin' || role === 'superadmin' || role === 'user';
+
+    if (!isAdminRole) {
+      return res.status(403).json({ message: 'Forbidden: Admin access required to delete documents' });
+    }
+
+    let doc = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      doc = await Document.findByIdAndDelete(id);
+    } else {
+      doc = await Document.findOneAndDelete({ trackingNo: String(id).trim() });
+    }
+
+    if (!doc) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    // Emit real-time event for deleted document
+    if (global.io) {
+      global.io.emit('document:deleted', {
+        documentId: String(doc._id),
+        trackingNo: doc.trackingNo,
+      });
+    }
+
+    res.json({ message: 'Document deleted successfully', documentId: String(doc._id), trackingNo: doc.trackingNo });
+  } catch (error) {
+    console.error('Delete document error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 module.exports = router;
+
+
