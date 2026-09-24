@@ -6,13 +6,81 @@ const { authenticateToken } = require('./auth.routes');
 
 const router = express.Router();
 
+const STANDARD_TRANSFER_TASKS = [
+  { match: /budget/i, task: 'For PR number', duration: '1 hour' },
+  { match: /budget/i, task: 'For OBR signing', duration: '1 hour' },
+  { match: /budget/i, task: 'For PR / OBR signing', duration: '1 hour' },
+  { match: /administrator|admin/i, task: 'For PR signing / approval', duration: '1 hour' },
+  { match: /bids|bac/i, task: 'For canvassing / resolution signing', duration: '1 hour' },
+  { match: /general\s*services|pgso|gso/i, task: 'For PO number', duration: '1 hour' },
+  { match: /administrator|admin/i, task: 'For PO signing', duration: '1 hour' },
+  { match: /general\s*services|pgso|gso/i, task: 'For supplier (signing) / inspection & delivery / voucher preparation / signing of end user', duration: '1 hour' },
+  { match: /accountant|accounting/i, task: 'For voucher signing', duration: '1 hour' },
+  { match: /treasurer|pto/i, task: 'For check preparation', duration: '1 hour' },
+  { match: /treasurer|pto/i, task: 'For signing of checks & voucher', duration: '1 hour' },
+  { match: /administrator|admin/i, task: 'For counter signing of checks', duration: '1 hour' },
+  { match: /treasurer|pto/i, task: 'For check advice', duration: '1 hour' },
+  { match: /treasurer|pto/i, task: 'For releasing of checks', duration: '1 hour' },
+];
+
+async function ensureStandardTransferTasks(offices) {
+  let anyModified = false;
+  for (const office of offices) {
+    if (office.type === 'viewing') continue;
+    const existingTaskNames = new Set((office.tasks || []).map(t => String(t.task || '').trim().toLowerCase()));
+    const offName = `${office.name || ''} ${office.description || ''}`.toLowerCase();
+    
+    let maxId = (office.tasks || []).reduce((m, t) => Math.max(m, Number(t.taskId) || 0), 0);
+    let officeModified = false;
+
+    for (const std of STANDARD_TRANSFER_TASKS) {
+      if (std.match.test(offName)) {
+        if (!existingTaskNames.has(std.task.toLowerCase())) {
+          maxId++;
+          office.tasks.push({
+            taskId: maxId,
+            task: std.task,
+            duration: std.duration,
+            status: 'active',
+          });
+          existingTaskNames.add(std.task.toLowerCase());
+          officeModified = true;
+          anyModified = true;
+        }
+      }
+    }
+    if (officeModified) {
+      await office.save();
+    }
+  }
+  return anyModified;
+}
+
 // GET /api/offices - list offices
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const offices = await Office.find({}).sort({ officeId: 1 });
+    let offices = await Office.find({}).sort({ officeId: 1 });
+    const totalTasks = offices.reduce((sum, o) => sum + (o.tasks ? o.tasks.length : 0), 0);
+    if (totalTasks === 0 && offices.length > 0) {
+      await ensureStandardTransferTasks(offices);
+      offices = await Office.find({}).sort({ officeId: 1 });
+    }
     res.json({ offices });
   } catch (error) {
     console.error('Get offices error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /api/offices/seed-transfer-tasks - seed or populate standard transfer tasks across offices
+router.post('/seed-transfer-tasks', authenticateToken, async (req, res) => {
+  try {
+    const offices = await Office.find({});
+    await ensureStandardTransferTasks(offices);
+    const updatedOffices = await Office.find({}).sort({ officeId: 1 });
+    res.json({ message: 'Transfer tasks seeded successfully', offices: updatedOffices });
+  } catch (error) {
+    console.error('Seed transfer tasks error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -165,6 +233,30 @@ router.patch('/:officeId/tasks/:taskId', authenticateToken, async (req, res) => 
     res.json({ message: 'Task updated successfully', office });
   } catch (error) {
     console.error('Update office task error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// DELETE /api/offices/:officeId/tasks/:taskId - delete task
+router.delete('/:officeId/tasks/:taskId', authenticateToken, async (req, res) => {
+  try {
+    const officeId = Number(req.params.officeId);
+    const taskId = Number(req.params.taskId);
+    if (!Number.isFinite(officeId) || !Number.isFinite(taskId)) {
+      return res.status(400).json({ message: 'Invalid officeId/taskId' });
+    }
+
+    const office = await Office.findOne({ officeId });
+    if (!office) return res.status(404).json({ message: 'Office not found' });
+
+    const idx = (office.tasks || []).findIndex((t) => Number(t.taskId) === taskId);
+    if (idx === -1) return res.status(404).json({ message: 'Task not found' });
+
+    office.tasks.splice(idx, 1);
+    await office.save();
+    res.json({ message: 'Task deleted successfully', office });
+  } catch (error) {
+    console.error('Delete office task error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

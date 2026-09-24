@@ -141,6 +141,7 @@ app.use('/api/documents', require('./routes/documents.routes'));
 app.use('/api/offices', require('./routes/offices.routes'));
 app.use('/api/departments', require('./routes/departments.routes'));
 app.use('/api/source-of-funds', require('./routes/sourceOfFunds.routes'));
+app.use('/api/tasks', require('./routes/tasks.routes'));
 app.use('/api/profile', require('./routes/profile.routes'));
 app.use('/api/settings', require('./routes/settings.routes'));
 app.use('/api/reports', require('./routes/reports.routes'));

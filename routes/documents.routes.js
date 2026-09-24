@@ -5,6 +5,7 @@ const Office = require('../models/Office');
 const User = require('../models/User');
 const EndUser = require('../models/EndUser');
 const ProcurementUser = require('../models/ProcurementUser');
+const Task = require('../models/Task');
 const { authenticateToken } = require('./auth.routes');
 
 const router = express.Router();
@@ -12,7 +13,14 @@ const router = express.Router();
 // GET /api/documents/stats - Dashboard statistics
 router.get('/stats', authenticateToken, async (req, res) => {
   try {
-    const offices = await Office.find({});
+    const [offices, globalTasks] = await Promise.all([
+      Office.find({}),
+      Task.find({ status: 'active' }).lean(),
+    ]);
+    const globalTasksMap = {};
+    (globalTasks || []).forEach(t => {
+      if (t?.task) globalTasksMap[String(t.task).trim().toLowerCase()] = t.duration || '1 hour';
+    });
     const transferTasksByOffice = {};
     offices.forEach(o => {
       const name = String(o.name || '').toUpperCase();
@@ -119,8 +127,9 @@ router.get('/stats', authenticateToken, async (req, res) => {
 
           if (off && taskName) {
             const task = (transferTasksByOffice[off] || []).find(t => String(t?.task || '').trim() === taskName);
-            if (task?.duration) {
-              const ms = parseDur(task.duration);
+            const durationStr = task?.duration || globalTasksMap[taskName.toLowerCase()];
+            if (durationStr) {
+              const ms = parseDur(durationStr);
               const start = new Date(latestMovementLog.createdAt).getTime();
               if (ms > 0 && Number.isFinite(start)) {
                 if (Date.now() > (start + ms)) {
@@ -160,7 +169,14 @@ router.get('/stats', authenticateToken, async (req, res) => {
 // GET /api/documents/overdue - List all documents that have exceeded their task duration
 router.get('/overdue', authenticateToken, async (req, res) => {
   try {
-    const offices = await Office.find({});
+    const [offices, globalTasks] = await Promise.all([
+      Office.find({}),
+      Task.find({ status: 'active' }).lean(),
+    ]);
+    const globalTasksMap = {};
+    (globalTasks || []).forEach(t => {
+      if (t?.task) globalTasksMap[String(t.task).trim().toLowerCase()] = t.duration || '1 hour';
+    });
     const transferTasksByOffice = {};
     offices.forEach(o => {
       const name = String(o.name || '').toUpperCase();
@@ -233,8 +249,9 @@ router.get('/overdue', authenticateToken, async (req, res) => {
 
         if (off && taskName) {
           const task = (transferTasksByOffice[off] || []).find(t => String(t?.task || '').trim() === taskName);
-          if (task?.duration) {
-            const ms = parseDur(task.duration);
+          const durationStr = task?.duration || globalTasksMap[taskName.toLowerCase()];
+          if (durationStr) {
+            const ms = parseDur(durationStr);
             const start = new Date(latestMovementLog.createdAt).getTime();
             if (ms > 0 && Number.isFinite(start) && Date.now() > (start + ms)) {
               const overdueMs = Date.now() - (start + ms);
@@ -245,7 +262,7 @@ router.get('/overdue', authenticateToken, async (req, res) => {
                 _overdueInfo: {
                   currentOffice: off,
                   taskName,
-                  taskDuration: task.duration,
+                  taskDuration: durationStr,
                   receivedAt: latestMovementLog.createdAt,
                   overdueMs,
                   overdueDays,
