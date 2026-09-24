@@ -157,6 +157,251 @@ router.get('/stats', authenticateToken, async (req, res) => {
   }
 });
 
+// GET /api/documents/overdue - List all documents that have exceeded their task duration
+router.get('/overdue', authenticateToken, async (req, res) => {
+  try {
+    const offices = await Office.find({});
+    const transferTasksByOffice = {};
+    offices.forEach(o => {
+      const name = String(o.name || '').toUpperCase();
+      transferTasksByOffice[name] = Array.isArray(o.tasks) ? o.tasks : [];
+    });
+
+    const documents = await Document.find({}).lean();
+
+    function parseDur(s) {
+      if (!s) return 0;
+      const match = s.toLowerCase().match(/^(\d+(?:\.\d+)?)\s*(day|days|hour|hours|hr|hrs|min|mins|minute|minutes|sec|secs|second|seconds)$/);
+      if (!match) return 0;
+      const v = parseFloat(match[1]);
+      const u = match[2];
+      if (u.startsWith('day')) return v * 24 * 3600000;
+      if (u.startsWith('hour') || u === 'hr' || u === 'hrs') return v * 3600000;
+      if (u.startsWith('min')) return v * 60000;
+      return v * 1000;
+    }
+
+    const prevalidationStatuses = new Set([
+      'pending',
+      'pending-gso',
+      'pending-bac',
+      'ready-transfer',
+      'for-validation',
+      'pre-validation',
+      'for-revision',
+    ]);
+
+    function hasTransferredLog(doc) {
+      if (!Array.isArray(doc.logs)) return false;
+      return doc.logs.some(l => String(l?.label || '').toLowerCase().includes('transferred to'));
+    }
+
+    const overdueDocs = [];
+
+    documents.forEach((doc) => {
+      const status = String(doc.status || '').toLowerCase();
+
+      // Skip pre-validation docs that haven't been transferred yet
+      if (prevalidationStatuses.has(status) && !hasTransferredLog(doc)) return;
+
+      // Skip completed / discontinued
+      const isCompleted = status === 'completed' || status === 'accomplished';
+      const isDiscontinued = status === 'discontinued' || status === 'cancelled' || status === 'closed';
+      if (isCompleted || isDiscontinued) return;
+
+      // Find the latest relevant movement log
+      const logs = Array.isArray(doc.logs) ? [...doc.logs].reverse() : [];
+      const latestMovementLog = logs.find(l => {
+        const lbl = String(l?.label || '').toLowerCase();
+        return lbl.startsWith('received') ||
+          lbl.startsWith('transferred') ||
+          lbl.startsWith('approved') ||
+          lbl.startsWith('completed') ||
+          lbl.includes('returned') ||
+          lbl.startsWith('discontinued');
+      });
+
+      if (latestMovementLog && String(latestMovementLog.label || '').toLowerCase().startsWith('received')) {
+        const off = String(latestMovementLog.byOffice || '').toUpperCase();
+        const lbl = String(latestMovementLog.label || '');
+        const taskName = (() => {
+          const m1 = lbl.match(/received\s*(?:for\s*)?(.*)$/i);
+          if (m1?.[1]) return m1[1].trim();
+          const m2 = lbl.match(/\(([^)]+)\)\s*$/);
+          return m2?.[1] ? m2[1].trim() : '';
+        })();
+
+        if (off && taskName) {
+          const task = (transferTasksByOffice[off] || []).find(t => String(t?.task || '').trim() === taskName);
+          if (task?.duration) {
+            const ms = parseDur(task.duration);
+            const start = new Date(latestMovementLog.createdAt).getTime();
+            if (ms > 0 && Number.isFinite(start) && Date.now() > (start + ms)) {
+              const overdueMs = Date.now() - (start + ms);
+              const overdueDays = Math.floor(overdueMs / (24 * 3600000));
+              const overdueHours = Math.floor((overdueMs % (24 * 3600000)) / 3600000);
+              overdueDocs.push({
+                ...doc,
+                _overdueInfo: {
+                  currentOffice: off,
+                  taskName,
+                  taskDuration: task.duration,
+                  receivedAt: latestMovementLog.createdAt,
+                  overdueMs,
+                  overdueDays,
+                  overdueHours,
+                  overdueLabel: overdueDays > 0
+                    ? `${overdueDays}d ${overdueHours}h overdue`
+                    : `${overdueHours}h overdue`,
+                },
+              });
+            }
+          }
+        }
+      }
+    });
+
+    // Sort by most overdue first
+    overdueDocs.sort((a, b) => b._overdueInfo.overdueMs - a._overdueInfo.overdueMs);
+
+    res.json({ documents: overdueDocs, total: overdueDocs.length });
+  } catch (error) {
+    console.error('Get overdue documents error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /api/documents/notify-overdue - Send notifications to offices/users for overdue documents
+router.post('/notify-overdue', authenticateToken, async (req, res) => {
+  try {
+    // Accept either a specific documentId or "all"
+    const { documentIds } = req.body; // array of _id strings, or omit for all
+    const io = global.io;
+
+    const offices = await Office.find({});
+    const transferTasksByOffice = {};
+    offices.forEach(o => {
+      const name = String(o.name || '').toUpperCase();
+      transferTasksByOffice[name] = Array.isArray(o.tasks) ? o.tasks : [];
+    });
+
+    const query = Array.isArray(documentIds) && documentIds.length > 0
+      ? { _id: { $in: documentIds } }
+      : {};
+
+    const documents = await Document.find(query).lean();
+
+    function parseDur(s) {
+      if (!s) return 0;
+      const match = s.toLowerCase().match(/^(\d+(?:\.\d+)?)\s*(day|days|hour|hours|hr|hrs|min|mins|minute|minutes|sec|secs|second|seconds)$/);
+      if (!match) return 0;
+      const v = parseFloat(match[1]);
+      const u = match[2];
+      if (u.startsWith('day')) return v * 24 * 3600000;
+      if (u.startsWith('hour') || u === 'hr' || u === 'hrs') return v * 3600000;
+      if (u.startsWith('min')) return v * 60000;
+      return v * 1000;
+    }
+
+    const prevalidationStatuses = new Set([
+      'pending', 'pending-gso', 'pending-bac', 'ready-transfer',
+      'for-validation', 'pre-validation', 'for-revision',
+    ]);
+
+    function hasTransferredLog(doc) {
+      if (!Array.isArray(doc.logs)) return false;
+      return doc.logs.some(l => String(l?.label || '').toLowerCase().includes('transferred to'));
+    }
+
+    let notifiedCount = 0;
+    const notifiedOffices = new Set();
+
+    for (const doc of documents) {
+      const status = String(doc.status || '').toLowerCase();
+      if (prevalidationStatuses.has(status) && !hasTransferredLog(doc)) continue;
+      const isCompleted = status === 'completed' || status === 'accomplished';
+      const isDiscontinued = status === 'discontinued' || status === 'cancelled' || status === 'closed';
+      if (isCompleted || isDiscontinued) continue;
+
+      const logs = Array.isArray(doc.logs) ? [...doc.logs].reverse() : [];
+      const latestMovementLog = logs.find(l => {
+        const lbl = String(l?.label || '').toLowerCase();
+        return lbl.startsWith('received') || lbl.startsWith('transferred') ||
+          lbl.startsWith('approved') || lbl.startsWith('completed') ||
+          lbl.includes('returned') || lbl.startsWith('discontinued');
+      });
+
+      if (!latestMovementLog || !String(latestMovementLog.label || '').toLowerCase().startsWith('received')) continue;
+
+      const off = String(latestMovementLog.byOffice || '').toUpperCase();
+      const lbl = String(latestMovementLog.label || '');
+      const taskName = (() => {
+        const m1 = lbl.match(/received\s*(?:for\s*)?(.*)$/i);
+        if (m1?.[1]) return m1[1].trim();
+        const m2 = lbl.match(/\(([^)]+)\)\s*$/);
+        return m2?.[1] ? m2[1].trim() : '';
+      })();
+
+      if (!off || !taskName) continue;
+
+      const task = (transferTasksByOffice[off] || []).find(t => String(t?.task || '').trim() === taskName);
+      if (!task?.duration) continue;
+
+      const ms = parseDur(task.duration);
+      const start = new Date(latestMovementLog.createdAt).getTime();
+      if (!(ms > 0 && Number.isFinite(start) && Date.now() > (start + ms))) continue;
+
+      const overdueMs = Date.now() - (start + ms);
+      const overdueDays = Math.floor(overdueMs / (24 * 3600000));
+      const overdueHours = Math.floor((overdueMs % (24 * 3600000)) / 3600000);
+      const overdueLabel = overdueDays > 0 ? `${overdueDays}d ${overdueHours}h overdue` : `${overdueHours}h overdue`;
+
+      const trackingNo = String(doc.trackingNo || '');
+      const purpose = String(doc.purpose || '').slice(0, 80);
+
+      const notifPayload = {
+        trackingNo,
+        title: `⚠️ Overdue Document: #${trackingNo}`,
+        message: `Document "${purpose}" is currently ${overdueLabel} at ${off} (Task: ${taskName}, Allowed: ${task.duration}).`,
+        overdueLabel,
+        taskName,
+        office: off,
+        taskDuration: task.duration,
+        type: 'overdue',
+        timestamp: new Date().toISOString(),
+      };
+
+      // Emit to the office room
+      if (io) {
+        io.to(`office:${off}`).emit('notification:office', notifPayload);
+
+        // Also emit to the document creator user room (by createdBy name)
+        const creator = String(doc.createdBy || '').trim();
+        if (creator) {
+          io.to(`user:${creator}`).emit('notification:user', {
+            ...notifPayload,
+            title: `⚠️ Your document #${trackingNo} is overdue`,
+            message: `Your document "${purpose}" is ${overdueLabel} — currently with ${off} (Task: ${taskName}).`,
+          });
+        }
+      }
+
+      notifiedOffices.add(off);
+      notifiedCount++;
+    }
+
+    res.json({
+      success: true,
+      notifiedCount,
+      notifiedOffices: Array.from(notifiedOffices),
+      message: `Notified ${notifiedCount} document${notifiedCount !== 1 ? 's' : ''} across ${notifiedOffices.size} office${notifiedOffices.size !== 1 ? 's' : ''}.`,
+    });
+  } catch (error) {
+    console.error('Notify overdue error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 async function loadCurrentUserOffice(reqUser) {
   const role = String(reqUser?.role || '').trim().toLowerCase();
   const userId = String(reqUser?.userId || '').trim();
