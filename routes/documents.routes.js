@@ -678,9 +678,7 @@ router.post('/', authenticateToken, async (req, res) => {
         'role:superadmin',
       ];
 
-      for (const room of gsoRooms) {
-        global.io.to(room).emit('notification:office', forReviewPayload);
-      }
+      global.io.to(gsoRooms).emit('notification:office', forReviewPayload);
     }
 
     res.status(201).json({
@@ -1104,10 +1102,11 @@ router.patch('/:id', authenticateToken, async (req, res) => {
       const isReturnedLog = hasNewLog && lastLabel.startsWith('returned');
       const isApprovedLog = hasNewLog && (lastLabel.startsWith('approved') || lastLabel.startsWith('completed'));
       const isRoutingSlip = typeof gsoRoutingSlip === 'string' && gsoRoutingSlip.trim().length > 0;
-      const isReviewLog   = hasNewLog && (
+      const isTransferLog = hasNewLog && (lastLabel.startsWith('transferred to') || lastLabel.includes('transferred to'));
+      const isReceivedLog = hasNewLog && (lastLabel.startsWith('received') || lastLabel.includes('received'));
+      const isReviewLog   = hasNewLog && !isTransferLog && !isReceivedLog && (
         lastLabel.startsWith('remarks') ||
         lastLabel.includes('review') ||
-        lastLabel.startsWith('transferred to') ||
         lastLabel.includes('reply')
       );
 
@@ -1119,7 +1118,8 @@ router.patch('/:id', authenticateToken, async (req, res) => {
         logByOffice.toUpperCase().includes('GENERAL SERVICES') ||
         logByOffice.toUpperCase().includes('BAC') ||
         logByOffice.toUpperCase().includes('BUDGET') ||
-        logByOffice.toUpperCase().includes('PTO');
+        logByOffice.toUpperCase().includes('PTO') ||
+        logByOffice.toUpperCase().includes('ACCOUNTING');
 
       const isCurrentRequestEndUser =
         currentRole === 'viewer' ||
@@ -1180,13 +1180,8 @@ router.patch('/:id', authenticateToken, async (req, res) => {
           document: doc,
         };
 
-        // Send to creator's personal room
+        // Send directly to creator's user room
         global.io.to(`user:${docCreatedBy}`).emit('notification:user', notifPayload);
-
-        // Also send to creator's office room
-        if (docOffice) {
-          global.io.to(`office:${docOffice}`).emit('notification:office', notifPayload);
-        }
       }
 
       // ── 2. Notify GSO / Reviewer if End-User replied in Review Logs ────────
@@ -1236,22 +1231,20 @@ router.patch('/:id', authenticateToken, async (req, res) => {
           global.io.to(`user:${targetReviewerUser}`).emit('notification:user', replyPayload);
         }
 
-        // Send to GSO / Procurement office rooms
-        const targetOffices = new Set([
-          'GSO',
-          'OFFICE OF THE PROVINCIAL GENERAL SERVICES',
-          'GENERAL SERVICES OFFICE',
-          targetReviewerOffice
-        ].filter(Boolean));
+        // Send to GSO / Procurement office rooms (single emit to array for deduplication)
+        const targetOffices = Array.from(new Set([
+          'office:GSO',
+          'office:OFFICE OF THE PROVINCIAL GENERAL SERVICES',
+          'office:GENERAL SERVICES OFFICE',
+          targetReviewerOffice ? `office:${targetReviewerOffice}` : '',
+        ].filter(Boolean)));
 
-        for (const off of targetOffices) {
-          global.io.to(`office:${off}`).emit('notification:office', replyPayload);
+        if (targetOffices.length > 0) {
+          global.io.to(targetOffices).emit('notification:office', replyPayload);
         }
       }
 
       // ── 3. Notify Destination Office and Document Creator on Transfer ─────
-      const isTransferLog = hasNewLog && (lastLabel.startsWith('transferred to') || lastLabel.includes('transferred to'));
-
       if (isTransferLog) {
         const match = lastLabel.match(/transferred\s+to\s+([^(:\n]+)/i);
         const destOffice = match ? match[1].trim().toUpperCase() : 'RECEIVING OFFICE';
@@ -1260,9 +1253,9 @@ router.patch('/:id', authenticateToken, async (req, res) => {
         const taskText = taskMatch ? taskMatch[1].trim() : '';
 
         const senderInfo = logByUser || reqActorName;
-        const senderOfficeInfo = docOffice || logByOffice;
+        const senderOfficeInfo = logByOffice || docOffice;
 
-        // 3A. Alert to Destination Office
+        // 3A. Alert to Destination Office (pass array of rooms to emit only once per socket)
         const incomingPayload = {
           type: 'DOCUMENT_TRANSFERRED',
           title: `📤 Incoming Document: #${trackingNo}`,
@@ -1277,7 +1270,7 @@ router.patch('/:id', authenticateToken, async (req, res) => {
           document: doc,
         };
 
-        const destRooms = new Set([
+        const destRooms = Array.from(new Set([
           `office:${destOffice}`,
           destOffice.includes('BUDGET') ? 'office:BUDGET' : '',
           destOffice.includes('BUDGET') ? 'office:PROVINCIAL BUDGET OFFICE' : '',
@@ -1294,10 +1287,10 @@ router.patch('/:id', authenticateToken, async (req, res) => {
           destOffice.includes('ACCOUNTING') ? 'office:ACCOUNTING' : '',
           destOffice.includes('ACCOUNTING') ? 'office:PROVINCIAL ACCOUNTING OFFICE' : '',
           `role:${destOffice.toLowerCase()}`,
-        ].filter(Boolean));
+        ].filter(Boolean)));
 
-        for (const room of destRooms) {
-          global.io.to(room).emit('notification:office', incomingPayload);
+        if (destRooms.length > 0) {
+          global.io.to(destRooms).emit('notification:office', incomingPayload);
         }
 
         // 3B. Alert to Document Creator (if transferred by procurement / other office)
@@ -1319,10 +1312,49 @@ router.patch('/:id', authenticateToken, async (req, res) => {
             document: doc,
           };
 
+          // Emit to creator's personal room only (to avoid duplicate toast)
           global.io.to(`user:${docCreatedBy}`).emit('notification:user', creatorPayload);
-          if (docOffice) {
-            global.io.to(`office:${docOffice}`).emit('notification:office', creatorPayload);
-          }
+        }
+      }
+
+      // ── 4. Notify Document Creator on Receive by Procurement / Other Office ──
+      if (isReceivedLog) {
+        const rawLabel = String(lastLog?.label || '').trim();
+        const senderInfo = logByUser || reqActorName;
+        const senderOfficeInfo = logByOffice || (req.user?.office ? String(req.user.office).trim() : '');
+
+        // Extract task or purpose if specified in the label
+        // Examples: "Received for Obligation", "Received for Pre-Audit", "Received by BUDGET"
+        const taskMatch = rawLabel.match(/received\s+(?:for\s+)?([^(:)]+)/i) || rawLabel.match(/\(([^)]+)\)/);
+        const taskText = taskMatch && !rawLabel.toLowerCase().includes('end user') ? taskMatch[1].trim() : '';
+
+        const isReceivedBySomeoneElse = docCreatedBy &&
+          !rawLabel.toLowerCase().includes('end user') &&
+          senderInfo.toLowerCase() !== docCreatedBy.toLowerCase();
+
+        if (isReceivedBySomeoneElse) {
+          const receivingOffice = senderOfficeInfo || 'Procurement Office';
+          const receivedMessage = taskText
+            ? `Your document #${trackingNo} was received by ${receivingOffice} for ${taskText} (by ${senderInfo})`
+            : `Your document #${trackingNo} was received by ${receivingOffice} (by ${senderInfo})`;
+
+          const receivePayload = {
+            type: 'DOCUMENT_RECEIVED',
+            title: `📥 Document Received: #${trackingNo}`,
+            message: receivedMessage,
+            documentId: String(doc._id),
+            trackingNo,
+            createdBy: docCreatedBy,
+            office: receivingOffice,
+            byUser: senderInfo,
+            byOffice: senderOfficeInfo,
+            taskName: taskText,
+            timestamp: new Date().toISOString(),
+            document: doc,
+          };
+
+          // Emit to creator's user room
+          global.io.to(`user:${docCreatedBy}`).emit('notification:user', receivePayload);
         }
       }
     }
