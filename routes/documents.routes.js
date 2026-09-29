@@ -1015,44 +1015,125 @@ router.patch('/:id', authenticateToken, async (req, res) => {
 
     if (returnToApprovals) {
       if (!isAdminRole) {
-        return res.status(403).json({ message: 'Forbidden: Only admin can return documents to approvals' });
-      }
-      if (Array.isArray(doc.logs)) {
-        doc.logs = doc.logs.filter((l) => {
-          const lbl = String(l?.label || '').trim().toLowerCase();
-          return !lbl.includes('transferred to') && !lbl.startsWith('received');
-        });
-      }
-      if (Array.isArray(doc.subDocuments)) {
-        doc.subDocuments.forEach((sub) => {
-          if (Array.isArray(sub.logs)) {
-            sub.logs = sub.logs.filter((l) => {
-              const lbl = String(l?.label || '').trim().toLowerCase();
-              return !lbl.includes('transferred to') && !lbl.startsWith('received');
-            });
-          }
-          sub.status = 'pending-gso';
-        });
+        return res.status(403).json({ message: 'Forbidden: Only admin can return documents' });
       }
 
-      doc.status = 'pending-gso';
+      // ── Determine Return Destination Automatically ────────────────────────────
+      // Rule 1 (ONGOING):
+      //   If document was in ONGOING or was already RECEIVED by the receiving office:
+      //   ONGOING → END USER REQUEST RETURN → ADMIN PROCESS → RETURNED DOCUMENTS → END USER RECEIVE → ONGOING
+      //   Destination: 'returned' (End user receives it, moves directly back to 'ongoing')
+      //
+      // Rule 2 (PRE-VALIDATION):
+      //   If document was in Pre-Validation and transferred but NOT YET RECEIVED by the receiving office:
+      //   PRE-VALIDATION → BUDGET (NOT YET RECEIVED) → END USER REQUEST RETURN → ADMIN PROCESS → PRE-VALIDATION
+      //   Destination: 'pending-gso' (Moves back to Pre-Validation)
+      //
+      // Note: Preserve all logs/audit trail intact (DO NOT delete previous transfer/received logs).
+
+      const logsList = Array.isArray(doc.logs) ? doc.logs : [];
+      let lastTransferIndex = -1;
+      for (let i = logsList.length - 1; i >= 0; i--) {
+        const lbl = String(logsList[i]?.label || '').trim().toLowerCase();
+        if (lbl.includes('transferred to')) {
+          lastTransferIndex = i;
+          break;
+        }
+      }
+
+      // Check if any office received the document after the last transfer
+      let hasBeenReceivedAfterTransfer = false;
+      if (lastTransferIndex >= 0) {
+        for (let i = lastTransferIndex + 1; i < logsList.length; i++) {
+          const lbl = String(logsList[i]?.label || '').trim().toLowerCase();
+          if (lbl.startsWith('received') && !lbl.includes('end user')) {
+            hasBeenReceivedAfterTransfer = true;
+            break;
+          }
+        }
+      }
+
+      const currentStatusLower = String(doc.status || '').trim().toLowerCase();
+      const isOngoingWorkflow = hasBeenReceivedAfterTransfer || currentStatusLower === 'ongoing' || currentStatusLower === 'returned';
+
+      const adminUserName = String(req.user?.fullName || req.user?.username || 'Admin').trim();
+      const remarksText = typeof returnRemarks === 'string' && returnRemarks.trim() ? returnRemarks.trim() : '';
+
       doc.returnToApprovalsRequested = false;
       doc.returnToApprovalsReason = '';
 
-      const adminUserName = String(req.user?.fullName || req.user?.username || 'Admin').trim();
-      const returnLogLabel = typeof returnRemarks === 'string' && returnRemarks.trim()
-        ? `Returned to Approvals: ${returnRemarks.trim()}`
-        : 'Returned to Approvals';
+      if (isOngoingWorkflow) {
+        // ── Rule 1: ONGOING → RETURNED DOCUMENTS
+        doc.status = 'returned';
+        if (Array.isArray(doc.subDocuments)) {
+          doc.subDocuments.forEach((sub) => {
+            sub.status = 'returned';
+          });
+        }
 
-      doc.logs.push({
-        label: returnLogLabel,
-        color: 'bg-amber-600',
-        byOffice: 'ADMIN',
-        byUser: adminUserName,
-        createdAt: Date.now(),
-      });
+        const returnLogLabel = remarksText
+          ? `Returned to End User: ${remarksText}`
+          : 'Returned to End User';
+
+        doc.logs.push({
+          label: returnLogLabel,
+          color: 'bg-rose-600',
+          byOffice: 'ADMIN',
+          byUser: adminUserName,
+          createdAt: Date.now(),
+        });
+      } else {
+        // ── Rule 2: PRE-VALIDATION → PRE-VALIDATION
+        doc.status = 'pending-gso';
+        if (Array.isArray(doc.subDocuments)) {
+          doc.subDocuments.forEach((sub) => {
+            sub.status = 'pending-gso';
+          });
+        }
+
+        const returnLogLabel = remarksText
+          ? `Returned to Pre-Validation: ${remarksText}`
+          : 'Returned to Pre-Validation';
+
+        doc.logs.push({
+          label: returnLogLabel,
+          color: 'bg-amber-600',
+          byOffice: 'ADMIN',
+          byUser: adminUserName,
+          createdAt: Date.now(),
+        });
+      }
+
       doc.updatedAt = Date.now();
       await doc.save();
+
+      // Real-time notifications to document owner
+      if (global.io) {
+        const docCreatedBy = String(doc.createdBy || '').trim();
+        if (docCreatedBy) {
+          if (isOngoingWorkflow) {
+            global.io.to(`user:${docCreatedBy}`).emit('notification:user', {
+              type: 'DOCUMENT_RETURNED',
+              title: `↩️ Document Returned: #${doc.trackingNo}`,
+              message: `Your return request for document #${doc.trackingNo} was processed by Admin. Please check Returned Documents to receive.`,
+              documentId: String(doc._id),
+              trackingNo: doc.trackingNo,
+              timestamp: new Date().toISOString(),
+              document: doc,
+            });
+          } else {
+            global.io.to(`user:${docCreatedBy}`).emit('notification:user', {
+              type: 'DOCUMENT_RETURNED_PREVAL',
+              title: `↩️ Returned to Pre-Validation: #${doc.trackingNo}`,
+              message: `Your return request for document #${doc.trackingNo} was processed by Admin. Document is now back in Pre-Validation.`,
+              documentId: String(doc._id),
+              trackingNo: doc.trackingNo,
+              timestamp: new Date().toISOString(),
+              document: doc,
+            });
+          }
+        }
+      }
     }
 
     if (addLog && typeof addLog === 'object') {
