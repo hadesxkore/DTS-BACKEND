@@ -1054,7 +1054,9 @@ router.patch('/:id', authenticateToken, async (req, res) => {
       }
 
       const currentStatusLower = String(doc.status || '').trim().toLowerCase();
-      const isOngoingWorkflow = hasBeenReceivedAfterTransfer || currentStatusLower === 'ongoing' || currentStatusLower === 'returned';
+      // Statuses that mean the document is already past pre-validation and in an office's hands:
+      const ongoingStatuses = ['ongoing', 'returned', 'in-budget', 'in-pto', 'pending-bac', 'approved'];
+      const isOngoingWorkflow = hasBeenReceivedAfterTransfer || ongoingStatuses.includes(currentStatusLower);
 
       const adminUserName = String(req.user?.fullName || req.user?.username || 'Admin').trim();
       const remarksText = typeof returnRemarks === 'string' && returnRemarks.trim() ? returnRemarks.trim() : '';
